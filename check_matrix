@@ -1,0 +1,128 @@
+#!/bin/sh
+# Does some unauthenticated checks against a matrix homeserver. Tested against
+# synapse. Supports verifying list of offered login flows, SSO redirect URI and
+# we can even try to see that room alias resolution works (because that's not
+# authenticated...).
+
+# Dependencies: curl and jq.
+
+while [ $# -gt 0 ]; do
+	case $1 in
+		--homeserver)
+			shift
+			HOMESERVER=$1
+			;;
+		--loginflows)
+			# Make sure this list is sorted! Example:
+			#  m.login.cas,m.login.jwt,m.login.sso,m.login.token,org.matrix.login.jwt
+			shift
+			LOGINFLOWS=$1
+			;;
+		--room)
+			# Make sure we can resolve room to an expected value.
+			# Can be given multiple times. Format is:
+			#    --room room_alias=room_id
+			shift
+			ROOMS="$ROOMS $1"
+			;;
+		--sso)
+			# Make sure that we get redirected to the right place
+			# when requesting a redirect to SSO provider. Expects
+			# the URI without any query parameters.
+			shift
+			SSO_URI=$1
+			;;
+	esac
+	shift
+done
+
+STATE=OK
+SERVICE=MATRIX
+OUTPUT="no problems"
+
+get() {
+	local path
+	path="$1"
+	if ! curl -s "${HOMESERVER}$path"; then
+		STATE=CRITICAL
+		OUTPUT="error getting ${HOMESERVER}$path";
+		return 1
+	fi
+}
+
+check_login_flows() {
+	local expected actual json
+	expected="$1"
+	json="$(get /_matrix/client/r0/login)"
+	if [ $? -ne 0 ]; then
+		return
+	fi
+	actual="$(echo "$json" | jq -r '.flows | map(.type) | sort | join(",")')"
+	if [ $? -ne 0 ]; then
+		STATE=CRITICAL
+		OUTPUT="problem processing login flow json"
+	elif [ "$expected" ] && [ "$actual" != "$expected" ]; then
+		STATE=CRITICAL
+		OUTPUT="unexpected login flows: $actual, should be $expected"
+	fi
+}
+
+check_client_version() {
+	local json
+	json="$(get /_matrix/client/versions)"
+	if [ $? -eq 0 ] && ! echo "$json" | jq . >/dev/null; then
+		STATE=CRITICAL
+		OUTPUT="problem processing client spec versions json"
+	fi
+}
+
+check_room() {
+	local room_name expected actual
+	room_name=$1
+	expected=$2
+
+	json="$(get /_matrix/client/r0/directory/room/%23${room_name})"
+	if [ $? -ne 0 ]; then
+		return
+	fi
+
+	actual="$(echo "$json" | jq -r .room_id)"
+	if [ $? -ne 0 ]; then
+		STATE=CRITICAL
+		OUTPUT="problem processing client spec versions json"
+	elif [ "$expected" != "$actual" ]; then
+		STATE=CRITICAL
+		OUTPUT="room name $room_name has unexpected room id $actual"
+	fi
+}
+
+check_sso() {
+	local expected resp http_status redir redir_prefix
+	expected=$1
+	resp=$(curl -si ${HOMESERVER}/_matrix/client/r0/login/sso/redirect?redirectUrl=/ | sed -re 's/\r//g')
+	http_status="$(echo "$resp" | head -n1)"
+	if [ "$http_status" != "HTTP/1.1 302 Found" ]; then
+		STATE=CRITICAL
+		OUTPUT="unexpected response when requesting sso redirect ($http_status)"
+		return
+	fi
+
+	redir="$(echo "$resp" | sed -nre 's/^Location:\s*(.*)/\1/p')"
+	redir_prefix=${redir%%\?*}
+	if [ "$redir_prefix" != "$expected" ]; then
+		STATE=CRITICAL
+		OUTPUT="sso redirect to unexpected location $redir_prefix"
+	fi
+}
+
+
+[ $STATE = OK ] && check_client_version
+[ $STATE = OK ] && check_login_flows "$LOGINFLOWS"
+[ $STATE = OK ] && [ "$SSO_URI" ] && check_sso "$SSO_URI"
+for room in $ROOMS; do
+	room_alias=${room%%=*}
+	room_id=${room#*=}
+	[ $STATE = OK ] && check_room "${room_alias#\#}" "$room_id"
+done
+
+echo "$SERVICE $STATE: $OUTPUT"
