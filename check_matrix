@@ -126,3 +126,9 @@ for room in $ROOMS; do
 done
 
 echo "$SERVICE $STATE: $OUTPUT"
+case STATE in
+	OK) exit 0 ;;
+	WARNING) exit 1 ;;
+	CRITICAL) exit 2 ;;
+	*) exit 3 ;;
+esac
