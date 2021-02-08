@@ -89,7 +89,7 @@ check_room() {
 	actual="$(echo "$json" | jq -r .room_id)"
 	if [ $? -ne 0 ]; then
 		STATE=CRITICAL
-		OUTPUT="problem processing client spec versions json"
+		OUTPUT="problem processing room info json"
 	elif [ "$expected" != "$actual" ]; then
 		STATE=CRITICAL
 		OUTPUT="room name $room_name has unexpected room id $actual"
